@@ -1,0 +1,60 @@
+version: "3.9"
+
+name: ${COMPOSE_PROJECT_NAME:-n8nstack}
+
+networks:
+  web:
+    external: false
+
+services:
+  traefik:
+    image: traefik:v2.11
+    restart: always
+    command:
+      - --api.dashboard=false
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --entryPoints.web.address=:80
+      - --entryPoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${ADMIN_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpChallenge.entryPoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${TRAEFIK_DATA}/acme:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - web
+
+  # === ДОБАВЛЯЕМ ЛЕЙБЛЫ ТОЛЬКО ДЛЯ СУЩЕСТВУЮЩИХ СЕРВИСОВ ===
+  # САЙТ: WordPress
+  wordpress:
+    labels:
+      - traefik.enable=${SITE_TYPE:-none}
+      - traefik.http.routers.site.rule=Host(`${SITE_DOMAIN}`)
+      - traefik.http.routers.site.entrypoints=websecure
+      - traefik.http.routers.site.tls.certresolver=le
+      - traefik.http.services.site.loadbalancer.server.port=80
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-n8nstack}_web
+
+  # САЙТ: Static
+  static-site:
+    labels:
+      - traefik.enable=${SITE_TYPE:-none}
+      - traefik.http.routers.site.rule=Host(`${SITE_DOMAIN}`)
+      - traefik.http.routers.site.entrypoints=websecure
+      - traefik.http.routers.site.tls.certresolver=le
+      - traefik.http.services.site.loadbalancer.server.port=80
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-n8nstack}_web
+
+  # ПРИМЕР: n8n
+  n8n:
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.n8n.rule=Host(`${N8N_DOMAIN}`)
+      - traefik.http.routers.n8n.entrypoints=websecure
+      - traefik.http.routers.n8n.tls.certresolver=le
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-n8nstack}_web

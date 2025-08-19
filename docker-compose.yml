@@ -14,25 +14,21 @@ volumes:
   grafana:
   prometheus_data:
   letta_data:
-  weaviate_data:
+  searxng_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
   portainer_data:
+  webui:
   comfyui_data:
   wordpress_data:
   wordpress_db_data:
 
-x-n8n: &service-n8n
-  build:
-    context: ./n8n
-    pull: true
-  environment: &service-n8n-env
-    DB_TYPE: postgresdb
-    DB_POSTGRESDB_HOST: postgres
-    DB_POSTGRESDB_USER: postgres
-    DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
-    DB_POSTGRESDB_DATABASE: postgres
-    N8N_TRUST_PROXY: true
-    N8N_DIAGNOSTICS_ENABLED: false
-    N8N_PERSONALIZATION_ENABLED: false
+x-n8n: &x-n8n
+  image: n8nio/n8n:latest
+  restart: unless-stopped
+  environment:
+    N8N_LOG_LEVEL: info
     N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
     N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_USER_MANAGEMENT_JWT_SECRET}
     WEBHOOK_URL: ${N8N_HOSTNAME:+https://}${N8N_HOSTNAME:-http://localhost:5678}/
@@ -45,570 +41,221 @@ x-n8n: &service-n8n
     QUEUE_BULL_REDIS_PORT: ${REDIS_PORT:-6379}
     N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true
     N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE: true
-    NODE_FUNCTION_ALLOW_BUILTIN: "*"
+    NODE_FUNCTION_ALLOW_BUILTIN: '*'
     NODE_FUNCTION_ALLOW_EXTERNAL: cheerio,axios,moment,lodash
     LANGCHAIN_ENDPOINT: ${LANGCHAIN_ENDPOINT}
-    LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2}
-    LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY}
+  depends_on:
+    - redis
+  volumes:
+    - n8n_storage:/home/node/.n8n
+  networks:
+    - web
 
-x-ollama: &service-ollama
+x-ollama: &x-ollama
   image: ollama/ollama:latest
-  container_name: ollama
   restart: unless-stopped
   environment:
-    - OLLAMA_CONTEXT_LENGTH=8192
-    - OLLAMA_FLASH_ATTENTION=1
-    - OLLAMA_KV_CACHE_TYPE=q8_0
-    - OLLAMA_MAX_LOADED_MODELS=2
+    - OLLAMA_HOST=0.0.0.0
   volumes:
     - ollama_storage:/root/.ollama
+  networks:
+    - web
 
-x-init-ollama: &init-ollama
-  image: ollama/ollama:latest
-  container_name: ollama-pull-llama
-  volumes:
-    - ollama_storage:/root/.ollama
-  entrypoint: /bin/sh
-  command:
-    - "-c"
-    - "sleep 3; OLLAMA_HOST=ollama:11434 ollama pull qwen2.5:7b-instruct-q4_K_M; OLLAMA_HOST=ollama:11434 ollama pull nomic-embed-text"
+x-init-ollama: &x-init-ollama
+  image: curlimages/curl:8.8.0
+  restart: "no"
+  entrypoint: ["/bin/sh","-lc"]
+  networks:
+    - web
 
 services:
   flowise:
-    image: flowiseai/flowise
+    image: flowiseai/flowise:latest
     restart: unless-stopped
-    container_name: flowise
-    profiles: ["flowise"]
     environment:
-      - PORT=3001
-      - FLOWISE_USERNAME=${FLOWISE_USERNAME}
-      - FLOWISE_PASSWORD=${FLOWISE_PASSWORD}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      PORT: 3001
+      FLOWISE_USERNAME: ${FLOWISE_USERNAME}
+      FLOWISE_PASSWORD: ${FLOWISE_PASSWORD}
     volumes:
-      - ~/.flowise:/root/.flowise
-    entrypoint: /bin/sh -c "sleep 3; flowise start"
+      - flowise:/root/.flowise
+    expose: ["3001"]
+    networks: [web]
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:latest
     restart: unless-stopped
-    container_name: open-webui
-    profiles: ["open-webui"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    environment:
+      # укажи OLLAMA_BASE_URL=http://ollama:11434 если используешь локальный ollama
+      - WEBUI_NAME=Open WebUI
     volumes:
       - open-webui:/app/backend/data
+    expose: ["8080"]
+    networks: [web]
 
   n8n-import:
-    <<: *service-n8n
-    container_name: n8n-import
-    profiles: ["n8n"]
-    environment:
-      <<: *service-n8n-env
-      RUN_N8N_IMPORT: ${RUN_N8N_IMPORT:-false}
-    entrypoint: /bin/sh
-    command: /scripts/n8n_import_script.sh
+    <<: *x-n8n
+    command: >
+      sh -lc "n8n import:credentials --input=/data/credentials.json || true &&
+              n8n import:workflow --separate --input=/data/workflows || true"
     volumes:
-      - ./n8n/backup:/backup
-      - ./n8n/n8n_import_script.sh:/scripts/n8n_import_script.sh:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - n8n_storage:/home/node/.n8n
+      - ./n8n-import:/data
+    networks: [web]
 
   n8n:
-    <<: *service-n8n
+    <<: *x-n8n
     container_name: n8n
-    profiles: ["n8n"]
-    restart: unless-stopped
-    volumes:
-      - n8n_storage:/home/node/.n8n
-      - ./n8n/backup:/backup
-      - ./shared:/data/shared
-    depends_on:
-      n8n-import:
-        condition: service_completed_successfully
+    expose: ["5678"]
+    networks: [web]
 
   n8n-worker:
-    <<: *service-n8n
-    profiles: ["n8n"]
-    restart: unless-stopped
-    command: worker
-    volumes:
-      - n8n_storage:/home/node/.n8n
-      - ./shared:/data/shared
-    depends_on:
-      n8n:
-        condition: service_started
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    deploy:
-      replicas: ${N8N_WORKER_COUNT:-1}
+    <<: *x-n8n
+    container_name: n8n-worker
+    command: n8n worker
+    expose: ["5679"]
+    networks: [web]
 
   qdrant:
-    image: qdrant/qdrant
-    container_name: qdrant
-    profiles: ["qdrant"]
+    image: qdrant/qdrant:latest
     restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     volumes:
       - qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
-    expose:
-      - "6333"
+    expose: ["6333"]
+    networks: [web]
 
   neo4j:
-    image: neo4j:latest
-    container_name: neo4j
-    profiles: ["neo4j"]
+    image: neo4j:5-community
     restart: unless-stopped
-    volumes:
-      - ./neo4j/logs:/logs
-      - ./neo4j/config:/config
-      - ./neo4j/data:/data
-      - ./neo4j/plugins:/plugins
     environment:
-      - NEO4J_AUTH=${NEO4J_AUTH_USERNAME}/${NEO4J_AUTH_PASSWORD}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    ulimits:
-      nofile:
-        soft: 40000
-        hard: 40000
-
-  caddy:
-    container_name: caddy
-    image: docker.io/library/caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
-      - "7687:7687"
-    restart: unless-stopped
+      - NEO4J_AUTH=${NEO4J_AUTH_USERNAME:-neo4j}/${NEO4J_AUTH_PASSWORD}
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=1G
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy-addon:/etc/caddy/addons:ro
-      - caddy-data:/data:rw
-      - caddy-config:/config:rw
-    environment:
-      - N8N_HOSTNAME=${N8N_HOSTNAME}
-      - WEBUI_HOSTNAME=${WEBUI_HOSTNAME}
-      - FLOWISE_HOSTNAME=${FLOWISE_HOSTNAME}
-      - DIFY_HOSTNAME=${DIFY_HOSTNAME}
-      - SUPABASE_HOSTNAME=${SUPABASE_HOSTNAME}
-      - SEARXNG_HOSTNAME=${SEARXNG_HOSTNAME}
-      - LANGFUSE_HOSTNAME=${LANGFUSE_HOSTNAME}
-      - WEAVIATE_HOSTNAME=${WEAVIATE_HOSTNAME}
-      - QDRANT_HOSTNAME=${QDRANT_HOSTNAME}
-      - NEO4J_HOSTNAME=${NEO4J_HOSTNAME}
-      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-internal}
-      - PROMETHEUS_HOSTNAME=${PROMETHEUS_HOSTNAME}
-      - GRAFANA_HOSTNAME=${GRAFANA_HOSTNAME}
-      - LETTA_HOSTNAME=${LETTA_HOSTNAME}
-      - PROMETHEUS_USERNAME=${PROMETHEUS_USERNAME}
-      - PROMETHEUS_PASSWORD_HASH=${PROMETHEUS_PASSWORD_HASH}
-      - SEARXNG_USERNAME=${SEARXNG_USERNAME}
-      - SEARXNG_PASSWORD_HASH=${SEARXNG_PASSWORD_HASH}
-      - PORTAINER_HOSTNAME=${PORTAINER_HOSTNAME}
-      - COMFYUI_HOSTNAME=${COMFYUI_HOSTNAME}
-      - COMFYUI_USERNAME=${COMFYUI_USERNAME}
-      - COMFYUI_PASSWORD_HASH=${COMFYUI_PASSWORD_HASH}
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
-        max-file: "1"
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+    expose: ["7474","7687"]
+    networks: [web]
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
-    restart: always
-    profiles: ["langfuse"]
-    depends_on: &langfuse-depends-on
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    environment: &langfuse-worker-env
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/langfuse
-      SALT: ${LANGFUSE_SALT}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
-      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
-      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
-      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+    image: langfuse/langfuse-worker:latest
+    restart: unless-stopped
+    environment:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
-      LANGFUSE_S3_BATCH_EXPORT_ENABLED: ${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-false}
-      LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_S3_BATCH_EXPORT_BUCKET:-langfuse}
-      LANGFUSE_S3_BATCH_EXPORT_PREFIX: ${LANGFUSE_S3_BATCH_EXPORT_PREFIX:-exports/}
-      LANGFUSE_S3_BATCH_EXPORT_REGION: ${LANGFUSE_S3_BATCH_EXPORT_REGION:-auto}
-      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT:-http://localhost:9090}
-      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: ${LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE:-true}
-      LANGFUSE_INGESTION_QUEUE_DELAY_MS: ${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}
-      LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: ${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      REDIS_AUTH: ${REDIS_AUTH:-LOCALONLYREDIS}
-      REDIS_TLS_ENABLED: ${REDIS_TLS_ENABLED:-false}
-      REDIS_TLS_CA: ${REDIS_TLS_CA:-/certs/ca.crt}
-      REDIS_TLS_CERT: ${REDIS_TLS_CERT:-/certs/redis.crt}
-      REDIS_TLS_KEY: ${REDIS_TLS_KEY:-/certs/redis.key}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_SALT: ${LANGFUSE_SALT}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+    networks: [web]
 
   langfuse-web:
-    image: langfuse/langfuse:3
-    restart: always
-    profiles: ["langfuse"]
-    depends_on: *langfuse-depends-on
+    image: langfuse/langfuse:latest
+    restart: unless-stopped
     environment:
-      <<: *langfuse-worker-env
-      NEXTAUTH_URL: https://${LANGFUSE_HOSTNAME}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-organization_id}
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Organization}
-      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-project_id}
-      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Project}
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
-      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
-      AUTH_DISABLE_SIGNUP: ${AUTH_DISABLE_SIGNUP:-true}
-
-  clickhouse:
-    image: clickhouse/clickhouse-server
-    restart: always
-    profiles: ["langfuse"]
-    user: "101:101"
-    environment:
-      CLICKHOUSE_DB: default
-      CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-    volumes:
-      - langfuse_clickhouse_data:/var/lib/clickhouse
-      - langfuse_clickhouse_logs:/var/log/clickhouse-server
-    healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 1s
-
-  minio:
-    image: minio/minio
-    restart: always
-    profiles: ["langfuse"]
-    entrypoint: sh
-    # create the 'langfuse' bucket before starting the service
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - langfuse_minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 1s
-      timeout: 5s
-      retries: 5
-      start_period: 1s
-
-  postgres:
-    container_name: postgres
-    image: postgres:${POSTGRES_VERSION:-latest}
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 3s
-      timeout: 3s
-      retries: 10
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: postgres
-    volumes:
-      - langfuse_postgres_data:/var/lib/postgresql/data
-
-  redis:
-    container_name: redis
-    image: docker.io/valkey/valkey:8-alpine
-    command: valkey-server --save 30 1 --loglevel warning
-    restart: unless-stopped
-    volumes:
-      - valkey-data:/data
-    cap_drop:
-      - ALL
-    cap_add:
-      - SETGID
-      - SETUID
-      - DAC_OVERRIDE
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
-        max-file: "1"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 3s
-      timeout: 10s
-      retries: 10
-
-  searxng:
-    container_name: searxng
-    image: docker.io/searxng/searxng:latest
-    profiles: ["searxng"]
-    restart: unless-stopped
-    volumes:
-      - ./searxng:/etc/searxng:rw
-    environment:
-      - SEARXNG_BASE_URL=https://${SEARXNG_HOSTNAME:-localhost}/
-      - UWSGI_WORKERS=${SEARXNG_UWSGI_WORKERS:-4}
-      - UWSGI_THREADS=${SEARXNG_UWSGI_THREADS:-4}
-    # cap_drop: - ALL  # Temporarily commented out for first run
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1m"
-        max-file: "1"
-
-  ollama-cpu:
-    profiles: ["cpu"]
-    <<: *service-ollama
-
-  ollama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *service-ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  ollama-gpu-amd:
-    profiles: ["gpu-amd"]
-    <<: *service-ollama
-    image: ollama/ollama:rocm
-    devices:
-      - "/dev/kfd"
-      - "/dev/dri"
-
-  ollama-pull-llama-cpu:
-    profiles: ["cpu"]
-    <<: *init-ollama
-    depends_on:
-      - ollama-cpu
-
-  ollama-pull-llama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *init-ollama
-    depends_on:
-      - ollama-gpu
-
-  ollama-pull-llama-gpu-amd:
-    profiles: [gpu-amd]
-    <<: *init-ollama
-    image: ollama/ollama:rocm
-    depends_on:
-      - ollama-gpu-amd
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    profiles: ["monitoring"]
-    restart: unless-stopped
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: node-exporter
-    profiles: ["monitoring"]
-    restart: unless-stopped
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - "--path.procfs=/host/proc"
-      - "--path.sysfs=/host/sys"
-      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-    expose:
-      - 9100
-
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
-    profiles: ["monitoring"]
-    restart: unless-stopped
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:rw
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-    expose:
-      - 8080
+    expose: ["3000"]
+    networks: [web]
 
   grafana:
     image: grafana/grafana:latest
-    container_name: grafana
-    profiles: ["monitoring"]
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
-      - GF_PROVISIONING_PATH=/etc/grafana/provisioning
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
     volumes:
       - grafana:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/var/lib/grafana/dashboards # Standard path often used, let's use Grafana's managed dashboards dir
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - prometheus
+    expose: ["3000"]
+    networks: [web]
 
-  crawl4ai:
-    image: unclecode/crawl4ai:latest # Use official image
-    container_name: crawl4ai
-    profiles: ["crawl4ai"]
-    restart: unless-stopped
-    shm_size: 1g # Recommended for browser operations
-    env_file:
-      - .env
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 4G # Increased based on documentation recommendation
-
-  gotenberg:
-    image: gotenberg/gotenberg:8
-    container_name: gotenberg
-    profiles: ["gotenberg"]
-    restart: unless-stopped
-    environment:
-      - DISABLE_GOOGLE_CHROME=false
-    healthcheck:
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  letta:
-    image: letta/letta:latest
-    container_name: letta
-    profiles: ["letta"]
+  prometheus:
+    image: prom/prometheus:latest
     restart: unless-stopped
     volumes:
-      - letta_data:/var/lib/postgresql/data
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    expose: ["9090"]
+    networks: [web]
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
-      SECURE: ${LETTA_SECURE:-true}
-      LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      SEARXNG_USERNAME: ${SEARXNG_USERNAME}
+      SEARXNG_PASSWORD: ${SEARXNG_PASSWORD}
+    volumes:
+      - searxng_data:/etc/searxng
+    expose: ["8080"]
+    networks: [web]
 
   weaviate:
-    image: cr.weaviate.io/semitechnologies/weaviate:latest
-    container_name: weaviate
-    profiles: ["weaviate"]
+    image: semitechnologies/weaviate:latest
     restart: unless-stopped
-    volumes:
-      - weaviate_data:/var/lib/weaviate
     environment:
       QUERY_DEFAULTS_LIMIT: 25
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
-      AUTHENTICATION_APIKEY_ENABLED: "true"
+      AUTHENTICATION_APIKEY_ENABLED: 'true'
       AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY}
       AUTHENTICATION_APIKEY_USERS: ${WEAVIATE_USERNAME}
-      AUTHORIZATION_ENABLE_RBAC: "true"
-      AUTHORIZATION_RBAC_ROOT_USERS: ${WEAVIATE_USERNAME}
-      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_API_BASED_MODULES: "true"
-      CLUSTER_HOSTNAME: "node1"
-      DEFAULT_VECTORIZER_MODULE: "none"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -q --spider http://localhost:8080/v1/.well-known/ready || exit 1",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    expose: ["8080"]
+    networks: [web]
+
+  redis:
+    image: valkey/valkey:7
+    container_name: redis
+    restart: unless-stopped
+    command: ["valkey-server","--appendonly","no"]
+    volumes:
+      - valkey-data:/data
+    expose: ["6379"]
+    networks: [web]
 
   portainer:
     image: portainer/portainer-ce:latest
-    container_name: portainer
-    profiles: ["portainer"]
     restart: unless-stopped
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - portainer_data:/data
-      - ${DOCKER_SOCKET_LOCATION:-/var/run/docker.sock}:/var/run/docker.sock
+    expose: ["9000"]
+    networks: [web]
+
+  ollama:
+    <<: *x-ollama
+    container_name: ollama
+    expose: ["11434"]
+    networks: [web]
+
+  open-webui-ollama-init:
+    <<: *x-init-ollama
+    depends_on: [ollama]
+    command: >
+      "until curl -sSf http://ollama:11434/api/tags; do echo waiting for ollama; sleep 3; done &&
+       echo 'ready'"
+    networks: [web]
 
   comfyui:
-    image: yanwk/comfyui-boot:cu124-slim
-    container_name: comfyui
-    profiles: ["comfyui"]
+    image: ghcr.io/comfyanonymous/comfyui:latest
     restart: unless-stopped
     environment:
       - CLI_ARGS=--listen 0.0.0.0 --cpu
     volumes:
       - comfyui_data:/home/runner
     healthcheck:
-      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8188"]
+      test: ["CMD","wget","-qO","/dev/null","http://localhost:8188"]
       interval: 10s
       timeout: 5s
       retries: 5
-# ──────────────────────────────────────────────────────────────────────────────
-# WordPress stack (optional, enabled via profile "wordpress")
-# ──────────────────────────────────────────────────────────────────────────────
+    expose: ["8188"]
+    networks: [web]
 
+  # ─────────────────────────────────────────────────────────────
+  # WordPress stack (enable via profile "wordpress")
+  # ─────────────────────────────────────────────────────────────
   wordpress-db:
     image: mariadb:11
-    container_name: wordpress-db
     restart: unless-stopped
     profiles: ["wordpress"]
     environment:
@@ -618,6 +265,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${WORDPRESS_DB_ROOT_PASSWORD}
     volumes:
       - wordpress_db_data:/var/lib/mysql
+    networks: [web]
 
   wordpress:
     image: wordpress:6.6-apache
@@ -636,3 +284,21 @@ services:
         define('WP_SITEURL', 'https://${WORDPRESS_DOMAIN}');
     volumes:
       - wordpress_data:/var/www/html
+    expose: ["80"]
+    networks: [web]
+
+  # ─────────────────────────────────────────────────────────────
+  # Static site (enable via profile "static")
+  # ─────────────────────────────────────────────────────────────
+  static-site:
+    image: nginx:alpine
+    restart: unless-stopped
+    profiles: ["static"]
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    expose: ["80"]
+    networks: [web]
+
+networks:
+  web:
+    driver: bridge

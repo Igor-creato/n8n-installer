@@ -1,0 +1,25 @@
+version: "3.9"
+
+name: ${COMPOSE_PROJECT_NAME:-n8nstack}
+
+networks:
+  web:
+    external: false
+
+services:
+  caddy:
+    image: caddy:2.8
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - SITE_DOMAIN=${SITE_DOMAIN}
+      - N8N_DOMAIN=${N8N_DOMAIN}
+    volumes:
+      - ${CADDY_CONFIG}:/etc/caddy/Caddyfile:ro
+      - ${CADDY_DATA}:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - web
