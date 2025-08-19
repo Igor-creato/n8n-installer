@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script to guide user through service selection for n8n-installer
+# Script to guide user through service selection for n8n-installer (safe version)
 set -e
 
 # Paths
@@ -8,12 +8,19 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$PROJECT_ROOT/.env"
 
 # Utils + logs
-source "$(dirname "$0")/utils.sh"
+if [ -f "$(dirname "$0")/utils.sh" ]; then
+  source "$(dirname "$0")/utils.sh"
+else
+  log_info()    { printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
+  log_error()   { printf "\033[1;31m[ERROR]\033[0m %s\n" "$*"; }
+  log_warning() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+  log_success() { printf "\033[1;32m[SUCCESS]\033[0m %s\n" "$*"; }
+fi
 
 # Ensure whiptail
-if ! command -v whiptail &> /dev/null; then
-  log_error "'whiptail' is not installed."
-  log_info "Install with: sudo apt-get install -y whiptail"
+if ! command -v whiptail >/dev/null 2>&1; then
+  log_error "'whiptail' не установлен."
+  log_info "Установите: sudo apt-get install -y whiptail"
   exit 1
 fi
 
@@ -31,7 +38,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 current_profiles_for_matching=",$CURRENT_PROFILES_VALUE,"
 
-# ---------------- Available services (keep your original set) ----------------
+# ---------------- Available services ----------------
 base_services_data=(
   "n8n" "n8n, n8n-worker, n8n-import (Workflow Automation)"
   "dify" "Dify (AI Application Development Platform with LLMOps)"
@@ -107,8 +114,6 @@ fi
 # Parse selected
 selected_profiles=()
 ollama_selected=0
-ollama_profile=""
-
 if [ -n "$CHOICES" ]; then
   eval "temp_choices=($CHOICES)"
   for choice in "${temp_choices[@]}"; do
@@ -135,20 +140,16 @@ if [ $ollama_selected -eq 1 ]; then
     ollama_hw_on_cpu="ON"; default_ollama_hardware="cpu"
   fi
 
-  ollama_hardware_options=(
-    "cpu" "CPU (Recommended for most users)" "$ollama_hw_on_cpu"
-    "gpu-nvidia" "NVIDIA GPU (Requires NVIDIA drivers & CUDA)" "$ollama_hw_on_gpu_nvidia"
-    "gpu-amd" "AMD GPU (Requires ROCm drivers)" "$ollama_hw_on_gpu_amd"
-  )
   CHOSEN_OLLAMA_PROFILE=$(whiptail --title "Ollama Hardware Profile" --default-item "$default_ollama_hardware" --radiolist \
 "Выберите профиль аппаратного ускорения для Ollama." \
 15 78 3 \
-"${ollama_hardware_options[@]}" \
+"cpu" "CPU (для большинства)" "$ollama_hw_on_cpu" \
+"gpu-nvidia" "NVIDIA GPU (нужны драйверы/CUDA)" "$ollama_hw_on_gpu_nvidia" \
+"gpu-amd" "AMD GPU (нужны драйверы ROCm)" "$ollama_hw_on_gpu_amd" \
 3>&1 1>&2 2>&3)
 
   if [ $? -eq 0 ] && [ -n "$CHOSEN_OLLAMA_PROFILE" ]; then
     selected_profiles+=("$CHOSEN_OLLAMA_PROFILE")
-    ollama_profile="$CHOSEN_OLLAMA_PROFILE"
     log_info "Ollama hardware profile: $CHOSEN_OLLAMA_PROFILE"
   else
     log_info "Профиль Ollama не выбран — Ollama будет пропущен."
@@ -167,72 +168,43 @@ fi
 [ -f "$ENV_FILE" ] || { log_warning "'.env' не найден, создаю пустой"; touch "$ENV_FILE"; }
 sed -i.bak "/^COMPOSE_PROFILES=/d" "$ENV_FILE" 2>/dev/null || true
 echo "COMPOSE_PROFILES=${COMPOSE_PROFILES_VALUE}" >> "$ENV_FILE"
-# Ensure COMPOSE_PROJECT_NAME default
-if ! grep -qE '^COMPOSE_PROJECT_NAME=' "$ENV_FILE"; then
-  echo "COMPOSE_PROJECT_NAME=n8nstack" >> "$ENV_FILE"
-  log_info "COMPOSE_PROJECT_NAME не задан — установлен по умолчанию: n8nstack"
-fi
 
-# Pre-check: warn about conflicting single-name containers that may break compose
-conflict_names=(redis n8n n8n-worker ollama wordpress)
-for n in "${conflict_names[@]}"; do
-  if docker ps -a --format '{{.Names}}' | grep -qx "$n"; then
-    log_warning "Найден одиночный контейнер '$n' — может конфликтовать со стеком. Рекомендуется: docker rm -f $n"
-  fi
-done
-
-# Monitoring: ensure prometheus.yml file exists (to avoid mounting a directory by mistake)
-if grep -qE '^\s*- \./monitoring/prometheus\.yml:/etc/prometheus/prometheus\.yml' "$PROJECT_ROOT/docker-compose.yml"; then
-  mkdir -p "$PROJECT_ROOT/monitoring"
-  if [ ! -f "$PROJECT_ROOT/monitoring/prometheus.yml" ]; then
-    cat > "$PROJECT_ROOT/monitoring/prometheus.yml" <<'YML'
-global:
-  scrape_interval: 15s
-scrape_configs:
-  - job_name: 'prometheus'
-    static_configs:
-      - targets: ['localhost:9090']
-YML
-    log_info "Создан минимальный monitoring/prometheus.yml"
-  fi
-fi
-
-
-# ====================== NEW: Site selection (wordpress/static/none) ======================
-# Read existing values (if any)
+# ---- Site selection (wordpress/static/none) ----
 SITE_TYPE_CUR=""; SITE_DOMAIN_CUR=""
 if [ -f "$ENV_FILE" ]; then
   SITE_TYPE_CUR="$(grep -E '^SITE_TYPE=' "$ENV_FILE" | cut -d= -f2- || true)"
   SITE_DOMAIN_CUR="$(grep -E '^SITE_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)"
 fi
 
-# If already configured earlier, don't ask again
-if [ -n "$SITE_TYPE_CUR" ] && [ "$SITE_TYPE_CUR" != "none" ] && [ -n "$SITE_DOMAIN_CUR" ]; then
-  SITE_TYPE="$SITE_TYPE_CUR"
-  SITE_DOMAIN="$SITE_DOMAIN_CUR"
-  log_info "Настройки сайта найдены в .env и будут использованы без повторных вопросов: ${SITE_TYPE} @ ${SITE_DOMAIN}"
-else
-  SITE_TYPE=$(whiptail --title "Site installation" --radiolist \
-"Установить сайт?\n(WordPress или статический сайт в папке ./site)" \
+# Precompute ON/OFF safely (no inline $() in radiolist)
+SITE_NONE_ON="OFF"; SITE_WP_ON="OFF"; SITE_STATIC_ON="OFF"
+case "${SITE_TYPE_CUR:-}" in
+  "")        SITE_NONE_ON="ON" ;;
+  "none")    SITE_NONE_ON="ON" ;;
+  "wordpress") SITE_WP_ON="ON" ;;
+  "static")  SITE_STATIC_ON="ON" ;;
+esac
+
+SITE_TYPE=$(whiptail --title "Site installation" --radiolist \
+"Установить сайт? (WordPress или статический сайт из ./site)" \
 14 70 3 \
-"none" "Не устанавливать сайт" $([ "$SITE_TYPE_CUR" = "none" ] || [ -z "$SITE_TYPE_CUR" ] && echo ON || echo OFF) \
-"wordpress" "Сайт на WordPress" $([ "$SITE_TYPE_CUR" = "wordpress" ] && echo ON || echo OFF) \
-"static" "Простой статический сайт (Nginx)" $([ "$SITE_TYPE_CUR" = "static" ] && echo ON || echo OFF) \
+"none" "Не устанавливать сайт" "$SITE_NONE_ON" \
+"wordpress" "Сайт на WordPress" "$SITE_WP_ON" \
+"static" "Простой статический сайт (Nginx)" "$SITE_STATIC_ON" \
 3>&1 1>&2 2>&3) || SITE_TYPE="${SITE_TYPE_CUR:-none}"
 
-  if [ -z "$SITE_TYPE" ]; then SITE_TYPE="none"; fi
+[ -n "$SITE_TYPE" ] || SITE_TYPE="none"
 
-  SITE_DOMAIN="$SITE_DOMAIN_CUR"
-  if [ "$SITE_TYPE" != "none" ]; then
-    HINT_DOMAIN="${SITE_DOMAIN_CUR:-site.example.com}"
-    SITE_DOMAIN=$(whiptail --title "Site domain" --inputbox \
+SITE_DOMAIN="$SITE_DOMAIN_CUR"
+if [ "$SITE_TYPE" != "none" ]; then
+  HINT_DOMAIN="${SITE_DOMAIN_CUR:-site.example.com}"
+  SITE_DOMAIN=$(whiptail --title "Site domain" --inputbox \
 "Введите полный домен сайта (FQDN), например: site.example.com" \
 10 70 "$HINT_DOMAIN" \
 3>&1 1>&2 2>&3) || SITE_DOMAIN="$SITE_DOMAIN_CUR"
-    if [ -z "$SITE_DOMAIN" ]; then
-      log_warning "Домен сайта не задан — установка сайта будет пропущена."
-      SITE_TYPE="none"
-    fi
+  if [ -z "$SITE_DOMAIN" ]; then
+    log_warning "Домен сайта не задан — установка сайта будет пропущена."
+    SITE_TYPE="none"
   fi
 fi
 
@@ -287,15 +259,21 @@ if [ "$SITE_TYPE" = "static" ]; then
 HTML
   fi
 fi
- (caddy/traefik) ======================
+
+# ---- Reverse proxy choice (caddy/traefik) ----
 REVERSE_PROXY_CUR=$(grep -E '^REVERSE_PROXY=' "$ENV_FILE" | cut -d= -f2- || true)
 [ -n "$REVERSE_PROXY_CUR" ] || REVERSE_PROXY_CUR="caddy"
+
+# Precompute ON/OFF
+RP_CADDY_ON="OFF"; RP_TRAEFIK_ON="OFF"
+if [ "$REVERSE_PROXY_CUR" = "caddy" ]; then RP_CADDY_ON="ON"; fi
+if [ "$REVERSE_PROXY_CUR" = "traefik" ]; then RP_TRAEFIK_ON="ON"; fi
 
 REVERSE_PROXY=$(whiptail --title "Reverse proxy" --radiolist \
 "Выберите реверс‑прокси (будет запущен ПОСЛЕДНИМ после всех сервисов)" \
 12 60 2 \
-"caddy" "Caddy (просто, автоконфиг SSL)" $([ "$REVERSE_PROXY_CUR" = "caddy" ] && echo ON || echo OFF) \
-"traefik" "Traefik (labels, dashboard, гибкая маршрутизация)" $([ "$REVERSE_PROXY_CUR" = "traefik" ] && echo ON || echo OFF) \
+"caddy" "Caddy (просто, автоконфиг SSL)" "$RP_CADDY_ON" \
+"traefik" "Traefik (labels, dashboard, гибкая маршрутизация)" "$RP_TRAEFIK_ON" \
 3>&1 1>&2 2>&3) || REVERSE_PROXY="$REVERSE_PROXY_CUR"
 
 sed -i.bak "/^REVERSE_PROXY=/d" "$ENV_FILE" 2>/dev/null || true
