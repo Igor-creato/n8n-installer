@@ -15,7 +15,39 @@ import argparse
 import platform
 import sys
 import yaml
+from pathlib import Path
 from dotenv import dotenv_values
+
+def ensure_prometheus_file():
+    """
+    Ensure monitoring/prometheus.yml exists as a FILE (not directory)
+    before any 'docker compose up'. If a directory exists at this path,
+    remove it and create a default file.
+    """
+    base = Path(__file__).resolve().parent  # start_services.py лежит в корне репо
+    prom_dir = base / "monitoring"
+    prom_file = prom_dir / "prometheus.yml"
+
+    prom_dir.mkdir(parents=True, exist_ok=True)
+
+    # Если по ошибке существует каталог вместо файла — удаляем
+    if prom_file.exists() and prom_file.is_dir():
+        print(f"[fix] Found directory instead of file at {prom_file} — removing")
+        shutil.rmtree(prom_file)
+
+    # Если файла нет — создаём дефолт
+    if not prom_file.exists():
+        default_cfg = """global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+"""
+        prom_file.write_text(default_cfg, encoding="utf-8")
+        print(f"[fix] Created default {prom_file}")
 
 def is_supabase_enabled():
     """Check if 'supabase' is in COMPOSE_PROFILES in .env file."""
@@ -367,6 +399,9 @@ def check_and_fix_docker_compose_for_searxng():
         print(f"Error checking/modifying docker-compose.yml for SearXNG: {e}")
 
 def main():
+    # Гарантируем корректный prometheus.yml ДО любых docker compose up
+    ensure_prometheus_file()
+
     # Clone and prepare repositories
     if is_supabase_enabled():
         clone_supabase_repo()

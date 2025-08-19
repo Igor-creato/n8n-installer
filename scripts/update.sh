@@ -8,6 +8,33 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." &> /dev/null && pwd )"
 
 log_info "== Update starting =="
 
+# --- Guard для prometheus.yml: гарантируем именно ФАЙЛ до любых compose up ---
+PROM_DIR="$PROJECT_ROOT/monitoring"
+PROM_FILE="$PROM_DIR/prometheus.yml"
+
+mkdir -p "$PROM_DIR"
+
+if [ -d "$PROM_FILE" ]; then
+  log_warning "[fix] Found directory instead of file at $PROM_FILE — removing"
+  rm -rf "$PROM_FILE"
+fi
+
+if [ ! -f "$PROM_FILE" ]; then
+  cat > "$PROM_FILE" <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+  chmod 644 "$PROM_FILE"
+  log_info "[fix] Created default $PROM_FILE"
+fi
+# --- End Guard ---
+
 # Подтянем последние изменения из git
 if command -v git >/dev/null 2>&1; then
   cd "$PROJECT_ROOT"

@@ -7,6 +7,35 @@ source "$(dirname "$0")/utils.sh"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# --- Guard для prometheus.yml: гарантируем именно ФАЙЛ до первого docker compose up ---
+PROM_DIR="$REPO_ROOT/monitoring"
+PROM_FILE="$PROM_DIR/prometheus.yml"
+
+mkdir -p "$PROM_DIR"
+
+# Если по ошибке существует каталог с именем prometheus.yml — удаляем
+if [ -d "$PROM_FILE" ]; then
+  log_warning "[fix] Found directory instead of file at $PROM_FILE — removing"
+  rm -rf "$PROM_FILE"
+fi
+
+# Если файла нет — создаём дефолт
+if [ ! -f "$PROM_FILE" ]; then
+  cat > "$PROM_FILE" <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+  chmod 644 "$PROM_FILE"
+  log_info "[fix] Created default $PROM_FILE"
+fi
+# --- End Guard ---
+
 # ------------------ OPTIONAL SITE INSTALLER ------------------
 add_site_interactive() {
   echo
