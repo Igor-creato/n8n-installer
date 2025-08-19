@@ -237,7 +237,7 @@ services:
     networks: [web]
 
   comfyui:
-    image: ghcr.io/comfyanonymous/comfyui:latest
+    image: ghcr.io/ai-dock/comfyui:latest-cuda
     restart: unless-stopped
     environment:
       - CLI_ARGS=--listen 0.0.0.0 --cpu
