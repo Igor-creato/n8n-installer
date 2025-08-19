@@ -167,6 +167,36 @@ fi
 [ -f "$ENV_FILE" ] || { log_warning "'.env' не найден, создаю пустой"; touch "$ENV_FILE"; }
 sed -i.bak "/^COMPOSE_PROFILES=/d" "$ENV_FILE" 2>/dev/null || true
 echo "COMPOSE_PROFILES=${COMPOSE_PROFILES_VALUE}" >> "$ENV_FILE"
+# Ensure COMPOSE_PROJECT_NAME default
+if ! grep -qE '^COMPOSE_PROJECT_NAME=' "$ENV_FILE"; then
+  echo "COMPOSE_PROJECT_NAME=n8nstack" >> "$ENV_FILE"
+  log_info "COMPOSE_PROJECT_NAME не задан — установлен по умолчанию: n8nstack"
+fi
+
+# Pre-check: warn about conflicting single-name containers that may break compose
+conflict_names=(redis n8n n8n-worker ollama wordpress)
+for n in "${conflict_names[@]}"; do
+  if docker ps -a --format '{{.Names}}' | grep -qx "$n"; then
+    log_warning "Найден одиночный контейнер '$n' — может конфликтовать со стеком. Рекомендуется: docker rm -f $n"
+  fi
+done
+
+# Monitoring: ensure prometheus.yml file exists (to avoid mounting a directory by mistake)
+if grep -qE '^\s*- \./monitoring/prometheus\.yml:/etc/prometheus/prometheus\.yml' "$PROJECT_ROOT/docker-compose.yml"; then
+  mkdir -p "$PROJECT_ROOT/monitoring"
+  if [ ! -f "$PROJECT_ROOT/monitoring/prometheus.yml" ]; then
+    cat > "$PROJECT_ROOT/monitoring/prometheus.yml" <<'YML'
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+YML
+    log_info "Создан минимальный monitoring/prometheus.yml"
+  fi
+fi
+
 
 # ====================== NEW: Site selection (wordpress/static/none) ======================
 # Read existing values (if any)
@@ -176,7 +206,13 @@ if [ -f "$ENV_FILE" ]; then
   SITE_DOMAIN_CUR="$(grep -E '^SITE_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)"
 fi
 
-SITE_TYPE=$(whiptail --title "Site installation" --radiolist \
+# If already configured earlier, don't ask again
+if [ -n "$SITE_TYPE_CUR" ] && [ "$SITE_TYPE_CUR" != "none" ] && [ -n "$SITE_DOMAIN_CUR" ]; then
+  SITE_TYPE="$SITE_TYPE_CUR"
+  SITE_DOMAIN="$SITE_DOMAIN_CUR"
+  log_info "Настройки сайта найдены в .env и будут использованы без повторных вопросов: ${SITE_TYPE} @ ${SITE_DOMAIN}"
+else
+  SITE_TYPE=$(whiptail --title "Site installation" --radiolist \
 "Установить сайт?\n(WordPress или статический сайт в папке ./site)" \
 14 70 3 \
 "none" "Не устанавливать сайт" $([ "$SITE_TYPE_CUR" = "none" ] || [ -z "$SITE_TYPE_CUR" ] && echo ON || echo OFF) \
@@ -184,18 +220,19 @@ SITE_TYPE=$(whiptail --title "Site installation" --radiolist \
 "static" "Простой статический сайт (Nginx)" $([ "$SITE_TYPE_CUR" = "static" ] && echo ON || echo OFF) \
 3>&1 1>&2 2>&3) || SITE_TYPE="${SITE_TYPE_CUR:-none}"
 
-if [ -z "$SITE_TYPE" ]; then SITE_TYPE="none"; fi
+  if [ -z "$SITE_TYPE" ]; then SITE_TYPE="none"; fi
 
-SITE_DOMAIN="$SITE_DOMAIN_CUR"
-if [ "$SITE_TYPE" != "none" ]; then
-  HINT_DOMAIN="${SITE_DOMAIN_CUR:-site.example.com}"
-  SITE_DOMAIN=$(whiptail --title "Site domain" --inputbox \
+  SITE_DOMAIN="$SITE_DOMAIN_CUR"
+  if [ "$SITE_TYPE" != "none" ]; then
+    HINT_DOMAIN="${SITE_DOMAIN_CUR:-site.example.com}"
+    SITE_DOMAIN=$(whiptail --title "Site domain" --inputbox \
 "Введите полный домен сайта (FQDN), например: site.example.com" \
 10 70 "$HINT_DOMAIN" \
 3>&1 1>&2 2>&3) || SITE_DOMAIN="$SITE_DOMAIN_CUR"
-  if [ -z "$SITE_DOMAIN" ]; then
-    log_warning "Домен сайта не задан — установка сайта будет пропущена."
-    SITE_TYPE="none"
+    if [ -z "$SITE_DOMAIN" ]; then
+      log_warning "Домен сайта не задан — установка сайта будет пропущена."
+      SITE_TYPE="none"
+    fi
   fi
 fi
 
@@ -250,8 +287,7 @@ if [ "$SITE_TYPE" = "static" ]; then
 HTML
   fi
 fi
-
-# ====================== NEW: Reverse proxy choice (caddy/traefik) ======================
+ (caddy/traefik) ======================
 REVERSE_PROXY_CUR=$(grep -E '^REVERSE_PROXY=' "$ENV_FILE" | cut -d= -f2- || true)
 [ -n "$REVERSE_PROXY_CUR" ] || REVERSE_PROXY_CUR="caddy"
 

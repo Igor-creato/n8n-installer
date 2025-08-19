@@ -1,33 +1,32 @@
 volumes:
-  n8n_storage:
-  ollama_storage:
-  qdrant_storage:
-  open-webui:
-  flowise:
-  caddy-data:
-  caddy-config:
-  valkey-data:
-  langfuse_postgres_data:
-  langfuse_clickhouse_data:
-  langfuse_clickhouse_logs:
-  langfuse_minio_data:
-  grafana:
-  prometheus_data:
-  letta_data:
-  searxng_data:
-  neo4j_data:
-  neo4j_logs:
-  neo4j_plugins:
-  portainer_data:
-  webui:
-  comfyui_data:
-  wordpress_data:
-  wordpress_db_data:
-
-x-n8n: &x-n8n
+  n8n_storage: null
+  ollama_storage: null
+  qdrant_storage: null
+  open-webui: null
+  flowise: null
+  caddy-data: null
+  caddy-config: null
+  valkey-data: null
+  langfuse_postgres_data: null
+  langfuse_clickhouse_data: null
+  langfuse_clickhouse_logs: null
+  langfuse_minio_data: null
+  grafana: null
+  prometheus_data: null
+  letta_data: null
+  searxng_data: null
+  neo4j_data: null
+  neo4j_logs: null
+  neo4j_plugins: null
+  portainer_data: null
+  webui: null
+  comfyui_data: null
+  wordpress_data: null
+  wordpress_db_data: null
+x-n8n:
   image: n8nio/n8n:latest
   restart: unless-stopped
-  environment:
+  environment: &id001
     N8N_LOG_LEVEL: info
     N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
     N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_USER_MANAGEMENT_JWT_SECRET}
@@ -37,7 +36,7 @@ x-n8n: &x-n8n
     EXECUTIONS_MODE: queue
     N8N_RUNNERS_ENABLED: true
     QUEUE_HEALTH_CHECK_ACTIVE: true
-    QUEUE_BULL_REDIS_HOST: ${REDIS_HOST:-redis}
+    QUEUE_BULL_REDIS_HOST: ${REDIS_HOST:-valkey}
     QUEUE_BULL_REDIS_PORT: ${REDIS_PORT:-6379}
     N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: true
     N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE: true
@@ -45,29 +44,28 @@ x-n8n: &x-n8n
     NODE_FUNCTION_ALLOW_EXTERNAL: cheerio,axios,moment,lodash
     LANGCHAIN_ENDPOINT: ${LANGCHAIN_ENDPOINT}
   depends_on:
-    - redis
-  volumes:
-    - n8n_storage:/home/node/.n8n
+  - redis
+  volumes: &id002
+  - n8n_storage:/home/node/.n8n
   networks:
-    - web
-
-x-ollama: &x-ollama
+  - web
+x-ollama:
   image: ollama/ollama:latest
   restart: unless-stopped
-  environment:
-    - OLLAMA_HOST=0.0.0.0
-  volumes:
-    - ollama_storage:/root/.ollama
+  environment: &id003
+  - OLLAMA_HOST=0.0.0.0
+  volumes: &id004
+  - ollama_storage:/root/.ollama
   networks:
-    - web
-
-x-init-ollama: &x-init-ollama
+  - web
+x-init-ollama:
   image: curlimages/curl:8.8.0
-  restart: "no"
-  entrypoint: ["/bin/sh","-lc"]
+  restart: 'no'
+  entrypoint: &id005
+  - /bin/sh
+  - -lc
   networks:
-    - web
-
+  - web
 services:
   flowise:
     image: flowiseai/flowise:latest
@@ -77,68 +75,86 @@ services:
       FLOWISE_USERNAME: ${FLOWISE_USERNAME}
       FLOWISE_PASSWORD: ${FLOWISE_PASSWORD}
     volumes:
-      - flowise:/root/.flowise
-    expose: ["3001"]
-    networks: [web]
-
+    - flowise:/root/.flowise
+    expose:
+    - '3001'
+    networks:
+    - web
   open-webui:
     image: ghcr.io/open-webui/open-webui:latest
     restart: unless-stopped
     environment:
-      # укажи OLLAMA_BASE_URL=http://ollama:11434 если используешь локальный ollama
-      - WEBUI_NAME=Open WebUI
+    - WEBUI_NAME=Open WebUI
     volumes:
-      - open-webui:/app/backend/data
-    expose: ["8080"]
-    networks: [web]
-
+    - open-webui:/app/backend/data
+    expose:
+    - '8080'
+    networks:
+    - web
   n8n-import:
-    <<: *x-n8n
-    command: >
-      sh -lc "n8n import:credentials --input=/data/credentials.json || true &&
-              n8n import:workflow --separate --input=/data/workflows || true"
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment: *id001
+    depends_on:
+    - valkey
     volumes:
-      - n8n_storage:/home/node/.n8n
-      - ./n8n-import:/data
-    networks: [web]
-
+    - n8n_storage:/home/node/.n8n
+    - ./n8n-import:/data
+    networks:
+    - web
+    command: "sh -lc \"n8n import:credentials --input=/data/credentials.json || true\
+      \ &&\n        n8n import:workflow --separate --input=/data/workflows || true\"\
+      \n"
   n8n:
-    <<: *x-n8n
-    container_name: n8n
-    expose: ["5678"]
-    networks: [web]
-
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment: *id001
+    depends_on:
+    - valkey
+    volumes: *id002
+    networks:
+    - web
+    expose:
+    - '5678'
   n8n-worker:
-    <<: *x-n8n
-    container_name: n8n-worker
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment: *id001
+    depends_on:
+    - valkey
+    volumes: *id002
+    networks:
+    - web
     command: n8n worker
-    expose: ["5679"]
-    networks: [web]
-
+    expose:
+    - '5679'
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     volumes:
-      - qdrant_storage:/qdrant/storage
-    expose: ["6333"]
-    networks: [web]
-
+    - qdrant_storage:/qdrant/storage
+    expose:
+    - '6333'
+    networks:
+    - web
   neo4j:
     image: neo4j:5-community
     restart: unless-stopped
     environment:
-      - NEO4J_AUTH=${NEO4J_AUTH_USERNAME:-neo4j}/${NEO4J_AUTH_PASSWORD}
-      - NEO4J_server_memory_heap_initial__size=1G
-      - NEO4J_server_memory_heap_max__size=1G
+    - NEO4J_AUTH=${NEO4J_AUTH_USERNAME:-neo4j}/${NEO4J_AUTH_PASSWORD}
+    - NEO4J_server_memory_heap_initial__size=1G
+    - NEO4J_server_memory_heap_max__size=1G
     volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
-      - neo4j_plugins:/plugins
-    expose: ["7474","7687"]
-    networks: [web]
-
+    - neo4j_data:/data
+    - neo4j_logs:/logs
+    - neo4j_plugins:/plugins
+    expose:
+    - '7474'
+    - '7687'
+    networks:
+    - web
   langfuse-worker:
     image: langfuse/langfuse-worker:latest
     restart: unless-stopped
@@ -152,35 +168,38 @@ services:
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
-    networks: [web]
-
+    networks:
+    - web
   langfuse-web:
     image: langfuse/langfuse:latest
     restart: unless-stopped
     environment:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-    expose: ["3000"]
-    networks: [web]
-
+    expose:
+    - '3000'
+    networks:
+    - web
   grafana:
     image: grafana/grafana:latest
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
     volumes:
-      - grafana:/var/lib/grafana
-    expose: ["3000"]
-    networks: [web]
-
+    - grafana:/var/lib/grafana
+    expose:
+    - '3000'
+    networks:
+    - web
   prometheus:
     image: prom/prometheus:latest
     restart: unless-stopped
     volumes:
-      - prometheus_data:/prometheus
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    expose: ["9090"]
-    networks: [web]
-
+    - prometheus_data:/prometheus
+    - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    expose:
+    - '9090'
+    networks:
+    - web
   searxng:
     image: searxng/searxng:latest
     restart: unless-stopped
@@ -188,10 +207,11 @@ services:
       SEARXNG_USERNAME: ${SEARXNG_USERNAME}
       SEARXNG_PASSWORD: ${SEARXNG_PASSWORD}
     volumes:
-      - searxng_data:/etc/searxng
-    expose: ["8080"]
-    networks: [web]
-
+    - searxng_data:/etc/searxng
+    expose:
+    - '8080'
+    networks:
+    - web
   weaviate:
     image: semitechnologies/weaviate:latest
     restart: unless-stopped
@@ -200,105 +220,121 @@ services:
       AUTHENTICATION_APIKEY_ENABLED: 'true'
       AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY}
       AUTHENTICATION_APIKEY_USERS: ${WEAVIATE_USERNAME}
-    expose: ["8080"]
-    networks: [web]
-
-  redis:
-    image: valkey/valkey:7
-    container_name: redis
-    restart: unless-stopped
-    command: ["valkey-server","--appendonly","no"]
-    volumes:
-      - valkey-data:/data
-    expose: ["6379"]
-    networks: [web]
-
+    expose:
+    - '8080'
+    networks:
+    - web
   portainer:
     image: portainer/portainer-ce:latest
     restart: unless-stopped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - portainer_data:/data
-    expose: ["9000"]
-    networks: [web]
-
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - portainer_data:/data
+    expose:
+    - '9000'
+    networks:
+    - web
   ollama:
-    <<: *x-ollama
-    container_name: ollama
-    expose: ["11434"]
-    networks: [web]
-
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment: *id003
+    volumes: *id004
+    networks:
+    - web
+    expose:
+    - '11434'
   open-webui-ollama-init:
-    <<: *x-init-ollama
-    depends_on: [ollama]
-    command: >
-      "until curl -sSf http://ollama:11434/api/tags; do echo waiting for ollama; sleep 3; done &&
-       echo 'ready'"
-    networks: [web]
-
+    image: curlimages/curl:8.8.0
+    restart: 'no'
+    entrypoint: *id005
+    networks:
+    - web
+    depends_on:
+    - ollama
+    command: "\"until curl -sSf http://ollama:11434/api/tags; do echo waiting for\
+      \ ollama; sleep 3; done &&\n echo 'ready'\"\n"
   comfyui:
     image: ghcr.io/ai-dock/comfyui:latest-cuda
     restart: unless-stopped
     environment:
-      - CLI_ARGS=--listen 0.0.0.0 --cpu
+    - CLI_ARGS=--listen 0.0.0.0 --cpu
     volumes:
-      - comfyui_data:/home/runner
+    - comfyui_data:/home/runner
     healthcheck:
-      test: ["CMD","wget","-qO","/dev/null","http://localhost:8188"]
+      test:
+      - CMD
+      - wget
+      - -qO
+      - /dev/null
+      - http://localhost:8188
       interval: 10s
       timeout: 5s
       retries: 5
-    expose: ["8188"]
-    networks: [web]
-
-  # ─────────────────────────────────────────────────────────────
-  # WordPress stack (enable via profile "wordpress")
-  # ─────────────────────────────────────────────────────────────
+    expose:
+    - '8188'
+    networks:
+    - web
   wordpress-db:
     image: mariadb:11
     restart: unless-stopped
-    profiles: ["wordpress"]
+    profiles:
+    - wordpress
     environment:
       MYSQL_DATABASE: ${WORDPRESS_DB_NAME:-wordpress}
       MYSQL_USER: ${WORDPRESS_DB_USER:-wpuser}
       MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${WORDPRESS_DB_ROOT_PASSWORD}
     volumes:
-      - wordpress_db_data:/var/lib/mysql
-    networks: [web]
-
+    - wordpress_db_data:/var/lib/mysql
+    networks:
+    - web
   wordpress:
     image: wordpress:6.6-apache
-    container_name: wordpress
     restart: unless-stopped
-    profiles: ["wordpress"]
+    profiles:
+    - wordpress
     depends_on:
-      - wordpress-db
+    - wordpress-db
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-wordpress}
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-wpuser}
       WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
-      WORDPRESS_CONFIG_EXTRA: |
-        define('WP_HOME', 'https://${WORDPRESS_DOMAIN}');
-        define('WP_SITEURL', 'https://${WORDPRESS_DOMAIN}');
-    volumes:
-      - wordpress_data:/var/www/html
-    expose: ["80"]
-    networks: [web]
+      WORDPRESS_CONFIG_EXTRA: 'define(''WP_HOME'', ''https://${WORDPRESS_DOMAIN}'');
 
-  # ─────────────────────────────────────────────────────────────
-  # Static site (enable via profile "static")
-  # ─────────────────────────────────────────────────────────────
+        define(''WP_SITEURL'', ''https://${WORDPRESS_DOMAIN}'');
+
+        '
+    volumes:
+    - wordpress_data:/var/www/html
+    expose:
+    - '80'
+    networks:
+    - web
   static-site:
     image: nginx:alpine
     restart: unless-stopped
-    profiles: ["static"]
+    profiles:
+    - static
     volumes:
-      - ./site:/usr/share/nginx/html:ro
-    expose: ["80"]
-    networks: [web]
-
+    - ./site:/usr/share/nginx/html:ro
+    expose:
+    - '80'
+    networks:
+    - web
+  valkey:
+    image: valkey/valkey:7
+    restart: unless-stopped
+    command:
+    - valkey-server
+    - --appendonly
+    - 'no'
+    volumes:
+    - valkey-data:/data
+    expose:
+    - '6379'
+    networks:
+    - web
 networks:
   web:
     driver: bridge
