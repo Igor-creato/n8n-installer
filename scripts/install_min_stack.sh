@@ -588,8 +588,21 @@ for i in {1..60}; do
   sleep 2
 done
 
-echo "[INFO] Инициализируем роли/расширения в Postgres..."
-docker exec -i supabase-db psql -U postgres -d "${POSTGRES_DB:-postgres}" <<SQL
+echo "[INFO] Инициализируем роли/расширения в Postgres (с авто-выбором пользователя)..."
+
+# Выберем, каким пользователем подключаться: сначала пробуем postgres, если нет — supabase_admin
+CONNECT_USER="postgres"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
+  psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1 \
+  || CONNECT_USER="supabase_admin"
+
+# Если и supabase_admin не пускает — просто пропустим инициализацию, чтобы не падать, и подскажем в лог
+if ! docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
+  psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1; then
+  echo "[WARN] Не удалось подключиться к БД ни postgres, ни supabase_admin — пропускаю инициализацию."
+else
+  docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -i supabase-db \
+    psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
@@ -629,8 +642,10 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;
 SQL
 
-echo "[INFO] Перезапускаем сервисы Supabase..."
-docker compose restart auth rest realtime storage functions studio
+  echo "[INFO] Рестарт сервисов Supabase..."
+  docker compose restart auth rest realtime storage functions studio
+fi
+
 
 # --- Вывод доступов ---
 cat <<INFO
