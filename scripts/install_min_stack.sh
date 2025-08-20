@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # --- Проверка прав ---
 if [[ $EUID -ne 0 ]]; then
-  echo "[!] Запускайте от root: sudo bash scripts/install_min_stack.sh"; exit 1;
+  echo "[!] Запускайте от root: sudo bash install_min_stack.sh"; exit 1;
 fi
 
 # --- Ввод параметров ---
@@ -41,7 +41,7 @@ apt-get update -y
 apt-get full-upgrade -y
 apt-get install -y ca-certificates curl gnupg lsb-release openssl apache2-utils ufw fail2ban jq git
 
-# Docker (официальный репозиторий) — идемпотентно
+# Docker (официальный репозиторий)
 install -m 0755 -d /etc/apt/keyrings
 if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
   curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
@@ -83,7 +83,8 @@ generate_env() {
   JWT_SECRET=$(randhex 32)         # HS256 секрет
   SECRET_KEY_BASE=$(randhex 32)    # для realtime
   POSTGRES_PASSWORD=$(randhex 24)
-  POSTGRES_USER="supabase_admin"   # <-- суперпользователь по умолчанию
+  POSTGRES_USER="supabase_admin"   # <-- суперпользователь
+  POSTGRES_DB="postgres"
 
   make_jwt() {
     local role="$1" iat exp header payload unsigned sig
@@ -140,7 +141,7 @@ JWT_EXPIRY=3600
 # Supabase (DB)
 POSTGRES_USER=${POSTGRES_USER}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-POSTGRES_DB=postgres
+POSTGRES_DB=${POSTGRES_DB}
 POSTGRES_HOST=db
 POSTGRES_PORT=5432
 PGRST_DB_SCHEMAS=public,storage,graphql_public
@@ -177,20 +178,14 @@ EOF
 # --- Генерация секретов (идемпотентно) ---
 if [ -f "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
   echo "[INFO] Найден .env — пропускаем генерацию секретов"
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  set -a; source "$ENV_FILE"; set +a
 else
   echo "[INFO] .env не найден — генерируем секреты"
   generate_env
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+  set -a; source "$ENV_FILE"; set +a
 fi
 
-# --- SQL bootstrap: расширения (векторные и полезные) ---
+# --- SQL bootstrap (только при самом первом запуске контейнера) ---
 cat >"$SUPABASE_SQL_DIR/00_enable_extensions.sql" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -207,7 +202,7 @@ if [[ "$SITE_TYPE" == "static" ]]; then
 HTML
 fi
 
-# --- docker-compose.yml (c профилями для сайта) ---
+# --- docker-compose.yml ---
 cat >"$COMPOSE_FILE" <<'YAML'
 name: n8n-supabase-stack
 
@@ -382,7 +377,6 @@ services:
       - traefik.http.routers.supabase-realtime.rule=Host(`${SUPABASE_HOST}`) && PathPrefix(`/realtime/`)
       - traefik.http.routers.supabase-realtime.entrypoints=websecure
       - traefik.http.routers.supabase-realtime.tls.certresolver=le
-      # rewrite на /socket/*
       - traefik.http.middlewares.rt-rewrite.replacepathregex.regex=^/realtime/v1/(.*)
       - traefik.http.middlewares.rt-rewrite.replacepathregex.replacement=/socket/$1
       - traefik.http.routers.supabase-realtime.middlewares=rt-rewrite
@@ -390,7 +384,7 @@ services:
     restart: unless-stopped
     networks: [proxy]
 
-  # Supabase: Storage (+ imgproxy)
+  # Supabase: Storage
   storage:
     image: supabase/storage-api:v1.26.4
     container_name: supabase-storage
@@ -411,7 +405,6 @@ services:
       - TENANT_ID=stub
       - REGION=stub
       - ENABLE_IMAGE_TRANSFORMATION=true
-      - IMGPROXY_URL=http://imgproxy:5001
     volumes:
       - supabase_storage:/var/lib/storage
     labels:
@@ -425,6 +418,7 @@ services:
     restart: unless-stopped
     networks: [proxy]
 
+  # imgproxy (не обязателен)
   imgproxy:
     image: darthsim/imgproxy:v3.8.0
     container_name: supabase-imgproxy
@@ -583,7 +577,7 @@ else
   docker compose --profile static up -d
 fi
 
-# === Авто-инициализация ролей Supabase и расширений (идемпотентно) ===
+# === Починка/инициализация ролей и схем (идемпотентно) ===
 echo "[INFO] Ждём Postgres (health=healthy)..."
 for i in {1..60}; do
   status=$(docker inspect -f '{{.State.Health.Status}}' supabase-db 2>/dev/null || echo "unknown")
@@ -591,17 +585,16 @@ for i in {1..60}; do
   sleep 2
 done
 
-echo "[INFO] Инициализируем роли/расширения в Postgres (через ${POSTGRES_USER})..."
+echo "[INFO] Инициализируем роли/расширения/схемы в Postgres (через ${POSTGRES_USER})..."
 
-CONNECT_USER="${POSTGRES_USER:-supabase_admin}"
-
-# Проверяем подключение, не падаем при ошибке
 if ! docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
-  psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1; then
-  echo "[WARN] Не удалось подключиться к БД как ${CONNECT_USER} — пропускаю инициализацию ролей/расширений."
-else
-  docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -i supabase-db \
-    psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" <<SQL
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tc "select 1" >/dev/null 2>&1; then
+  echo "[ERROR] Не удалось подключиться к БД в контейнере supabase-db от имени ${POSTGRES_USER}."
+  exit 1
+fi
+
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -i supabase-db \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
@@ -640,13 +633,11 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- схема для realtime
 CREATE SCHEMA IF NOT EXISTS _realtime AUTHORIZATION supabase_admin;
 SQL
 
-  echo "[INFO] Рестарт сервисов Supabase..."
-  docker compose restart auth rest realtime storage functions studio
-fi
+echo "[INFO] Рестарт сервисов Supabase..."
+docker compose restart auth rest realtime storage functions studio
 
 # --- Вывод доступов ---
 cat <<INFO
@@ -686,8 +677,6 @@ Postgres:
   Пароль:          ${POSTGRES_PASSWORD}
   Строка:          postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 
-Storage (локальные файлы): том Docker supabase_storage
-
 Studio (BasicAuth, через Traefik):
   Пользователь:    supabase
   Пароль:          ${STUDIO_PASS:-<см. при первом запуске>}
@@ -704,11 +693,10 @@ WordPress / MariaDB (если выбран WordPress):
 Для обновления:
   cd ${STACK_DIR} && docker compose pull && docker compose up -d
 
-Резервные копии:
-  • DB: volume supabase_db_data
+Резервные копии (Docker volumes):
+  • DB: supabase_db_data
   • Файлы: supabase_storage, wp_data, wp_db_data, n8n_data
   • Certs: traefik_letsencrypt
-  Данные сохраняются при перезапусках и обновлениях.
 
 ============================================================
 INFO
