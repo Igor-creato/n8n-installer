@@ -554,6 +554,67 @@ else
   docker compose --profile static up -d
 fi
 
+# === Авто-инициализация ролей Supabase и расширений ===
+log() { echo -e "\033[1;32m[INFO]\033[0m $*"; }
+
+# Ждём, пока Postgres станет healthy
+log "Ждём Postgres (health=healthy)..."
+for i in {1..60}; do
+  status=$(docker inspect -f '{{.State.Health.Status}}' supabase-db 2>/dev/null || echo "unknown")
+  [ "$status" = "healthy" ] && log "Postgres healthy" && break
+  sleep 2
+done
+
+# Загружаем .env (для POSTGRES_PASSWORD/POSTGRES_DB)
+set -a
+source "$ENV_FILE"
+set +a
+
+log "Инициализируем роли/расширения в Postgres..."
+docker exec -i supabase-db psql -U postgres -d "${POSTGRES_DB:-postgres}" <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_admin LOGIN SUPERUSER PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
+    EXECUTE 'CREATE ROLE authenticator LOGIN NOINHERIT PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE authenticator WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'CREATE ROLE anon NOLOGIN';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'CREATE ROLE authenticated NOLOGIN';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_auth_admin LOGIN PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE supabase_auth_admin WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_storage_admin LOGIN PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE supabase_storage_admin WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+END
+\$\$;
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+
+log "Рестарт зависимых сервисов Supabase..."
+docker compose restart auth rest realtime storage functions studio
+
+
 # --- Вывод доступов ---
 cat <<INFO
 
