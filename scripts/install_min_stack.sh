@@ -473,7 +473,7 @@ services:
       - SUPABASE_URL=${SUPABASE_PUBLIC_URL}
       - SUPABASE_ANON_KEY=${ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}
-      - SUPABASE_DB_URL=postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      - SUPABASE_DB_URL=postgresql://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
     volumes:
       - ./volumes/functions:/home/deno/functions:Z
     labels:
@@ -596,7 +596,7 @@ docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
   psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1 \
   || CONNECT_USER="supabase_admin"
 
-# Если и supabase_admin не пускает — просто пропустим инициализацию, чтобы не падать, и подскажем в лог
+# Если и supabase_admin не пускает — мягко пропускаем инициализацию
 if ! docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
   psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1; then
   echo "[WARN] Не удалось подключиться к БД ни postgres, ни supabase_admin — пропускаю инициализацию."
@@ -640,12 +640,14 @@ END
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;
+
+-- схема для realtime
+CREATE SCHEMA IF NOT EXISTS _realtime AUTHORIZATION supabase_admin;
 SQL
 
   echo "[INFO] Рестарт сервисов Supabase..."
   docker compose restart auth rest realtime storage functions studio
 fi
-
 
 # --- Вывод доступов ---
 cat <<INFO
@@ -681,9 +683,9 @@ Postgres:
   Хост:            db
   Порт:            5432
   БД:              ${POSTGRES_DB}
-  Пользователь:    postgres (а также служебные роли Supabase)
+  Пользователь:    supabase_admin (а также служебные роли Supabase)
   Пароль:          ${POSTGRES_PASSWORD}
-  Строка:          postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+  Строка:          postgresql://supabase_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 
 Storage (локальные файлы): том Docker supabase_storage
 
