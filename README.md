@@ -98,6 +98,12 @@ The recommended way to install is using the provided main installation script.
     git clone https://github.com/Igor-creato/n8n-installer && cd n8n-installer && sudo bash ./scripts/install.sh
     ```
 
+3. Run min stack
+   
+   ```bash
+    git clone https://github.com/Igor-creato/n8n-installer && cd n8n-installer && sudo bash ./scripts/install_min_stack.sh
+    ```
+
 This single command automates the entire setup process, including:
 
 - Preparing your system (updates, firewall configuration, and basic security enhancements like brute-force protection).
