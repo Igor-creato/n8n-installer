@@ -26,7 +26,9 @@ ENV_FILE="$STACK_DIR/.env"
 COMPOSE_FILE="$STACK_DIR/docker-compose.yml"
 SUPABASE_SQL_DIR="$STACK_DIR/supabase/init"
 STATIC_SITE_DIR="$STACK_DIR/site"
-mkdir -p "$STACK_DIR" "$SUPABASE_SQL_DIR" "$STATIC_SITE_DIR"
+EDGE_FUNCS_DIR="$STACK_DIR/volumes/functions"
+
+mkdir -p "$STACK_DIR" "$SUPABASE_SQL_DIR" "$STATIC_SITE_DIR" "$EDGE_FUNCS_DIR"
 
 SITE_HOST="$BASE_DOMAIN"
 SUPABASE_HOST="supabase.$BASE_DOMAIN"
@@ -39,10 +41,13 @@ apt-get update -y
 apt-get full-upgrade -y
 apt-get install -y ca-certificates curl gnupg lsb-release openssl apache2-utils ufw fail2ban jq git
 
-# Docker (официальный репозиторий)
+# Docker (официальный репозиторий) — идемпотентно
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
+if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+  curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg \
+    | gpg --dearmor --yes --batch -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+fi
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") $(. /etc/os-release; echo "$VERSION_CODENAME") stable" \
   > /etc/apt/sources.list.d/docker.list
 apt-get update -y
@@ -68,46 +73,47 @@ maxretry = 5
 JAIL
 systemctl restart fail2ban || true
 
-# --- Генерация секретов ---
+# --- Хелперы генерации секретов ---
 randhex() { openssl rand -hex "$1"; }   # аргумент — байты
 b64url()  { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 now()     { date +%s; }
 
-# Supabase ключи
-JWT_SECRET=$(randhex 32)         # HS256 секрет
-SECRET_KEY_BASE=$(randhex 32)    # для realtime
-POSTGRES_PASSWORD=$(randhex 24)
+generate_env() {
+  # Supabase ключи
+  JWT_SECRET=$(randhex 32)         # HS256 секрет
+  SECRET_KEY_BASE=$(randhex 32)    # для realtime
+  POSTGRES_PASSWORD=$(randhex 24)
 
-make_jwt() {
-  local role="$1" iat exp header payload unsigned sig
-  iat=$(now); exp=$((iat+315360000)) # 10 лет
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  payload=$(printf '{"role":"%s","iss":"supabase","iat":%d,"exp":%d}' "$role" "$iat" "$exp" | b64url)
-  unsigned="$header.$payload"
-  sig=$(printf %s "$unsigned" | openssl dgst -binary -sha256 -hmac "$JWT_SECRET" | b64url)
-  echo "$unsigned.$sig"
-}
-ANON_KEY=$(make_jwt anon)
-SERVICE_ROLE_KEY=$(make_jwt service_role)
+  make_jwt() {
+    local role="$1" iat exp header payload unsigned sig
+    iat=$(now); exp=$((iat+315360000)) # 10 лет
+    header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+    payload=$(printf '{"role":"%s","iss":"supabase","iat":%d,"exp":%d}' "$role" "$iat" "$exp" | b64url)
+    unsigned="$header.$payload"
+    sig=$(printf %s "$unsigned" | openssl dgst -binary -sha256 -hmac "$JWT_SECRET" | b64url)
+    echo "$unsigned.$sig"
+  }
+  ANON_KEY=$(make_jwt anon)
+  SERVICE_ROLE_KEY=$(make_jwt service_role)
 
-# n8n
-N8N_BASIC_AUTH_USER="admin"
-N8N_BASIC_AUTH_PASSWORD=$(randhex 12)
-N8N_ENCRYPTION_KEY=$(randhex 32)
+  # n8n
+  N8N_BASIC_AUTH_USER="admin"
+  N8N_BASIC_AUTH_PASSWORD=$(randhex 12)
+  N8N_ENCRYPTION_KEY=$(randhex 32)
 
-# WordPress / MariaDB
-WP_DB_NAME="wordpress"
-WP_DB_USER="wpuser"
-WP_DB_PASSWORD=$(randhex 16)
-MYSQL_ROOT_PASSWORD=$(randhex 16)
+  # WordPress / MariaDB
+  WP_DB_NAME="wordpress"
+  WP_DB_USER="wpuser"
+  WP_DB_PASSWORD=$(randhex 16)
+  MYSQL_ROOT_PASSWORD=$(randhex 16)
 
-# Studio BasicAuth для Traefik
-STUDIO_USER="supabase"
-STUDIO_PASS=$(randhex 10)
-STUDIO_HTPASSWD=$(htpasswd -nbB "$STUDIO_USER" "$STUDIO_PASS" | sed -e 's/\$/$$/g')
+  # Studio BasicAuth для Traefik
+  STUDIO_USER="supabase"
+  STUDIO_PASS=$(randhex 10)
+  STUDIO_HTPASSWD=$(htpasswd -nbB "$STUDIO_USER" "$STUDIO_PASS" | sed -e 's/\$/$$/g')
 
-# --- .env ---
-cat >"$ENV_FILE" <<EOF
+  # --- .env ---
+  cat >"$ENV_FILE" <<EOF
 # Домены
 BASE_DOMAIN=${BASE_DOMAIN}
 SITE_HOST=${SITE_HOST}
@@ -137,7 +143,7 @@ POSTGRES_HOST=db
 POSTGRES_PORT=5432
 PGRST_DB_SCHEMAS=public,storage,graphql_public
 SITE_URL=https://${SITE_HOST}
-API_EXTERNAL_URL=https://${SUPABASE_HOST}
+API_EXTERNAL_URL=https://${SUPABASE_HOST}/auth/v1
 SUPABASE_PUBLIC_URL=https://${SUPABASE_HOST}
 
 # SMTP (по умолчанию выключено)
@@ -163,7 +169,24 @@ WP_DB_USER=${WP_DB_USER}
 WP_DB_PASSWORD=${WP_DB_PASSWORD}
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 EOF
-chmod 600 "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+}
+
+# --- Генерация секретов (идемпотентно) ---
+if [ -f "$ENV_FILE" ] && [ -s "$ENV_FILE" ]; then
+  echo "[INFO] Найден .env — пропускаем генерацию секретов"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+else
+  echo "[INFO] .env не найден — генерируем секреты"
+  generate_env
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
 
 # --- SQL bootstrap: расширения (векторные и полезные) ---
 cat >"$SUPABASE_SQL_DIR/00_enable_extensions.sql" <<'SQL'
@@ -187,7 +210,8 @@ cat >"$COMPOSE_FILE" <<'YAML'
 name: n8n-supabase-stack
 
 volumes:
-  traefik_letsencrypt: {}
+  traefik_letsencrypt:
+    name: traefik_letsencrypt
   n8n_data: {}
   supabase_db_data: {}
   supabase_storage: {}
@@ -355,8 +379,10 @@ services:
       - traefik.http.routers.supabase-realtime.rule=Host(`${SUPABASE_HOST}`) && PathPrefix(`/realtime/`)
       - traefik.http.routers.supabase-realtime.entrypoints=websecure
       - traefik.http.routers.supabase-realtime.tls.certresolver=le
-      - traefik.http.routers.supabase-realtime.middlewares=supabase-realtime-strip
-      - traefik.http.middlewares.supabase-realtime-strip.stripprefixregex.regex=^/realtime/v1
+      # rewrite на /socket/*
+      - traefik.http.middlewares.rt-rewrite.replacepathregex.regex=^/realtime/v1/(.*)
+      - traefik.http.middlewares.rt-rewrite.replacepathregex.replacement=/socket/$1
+      - traefik.http.routers.supabase-realtime.middlewares=rt-rewrite
       - traefik.http.services.supabase-realtime.loadbalancer.server.port=4000
     restart: unless-stopped
     networks: [proxy]
@@ -554,23 +580,15 @@ else
   docker compose --profile static up -d
 fi
 
-# === Авто-инициализация ролей Supabase и расширений ===
-log() { echo -e "\033[1;32m[INFO]\033[0m $*"; }
-
-# Ждём, пока Postgres станет healthy
-log "Ждём Postgres (health=healthy)..."
+# === Авто-инициализация ролей Supabase и расширений (идемпотентно) ===
+echo "[INFO] Ждём Postgres (health=healthy)..."
 for i in {1..60}; do
   status=$(docker inspect -f '{{.State.Health.Status}}' supabase-db 2>/dev/null || echo "unknown")
-  [ "$status" = "healthy" ] && log "Postgres healthy" && break
+  [ "$status" = "healthy" ] && echo "[INFO] Postgres healthy" && break
   sleep 2
 done
 
-# Загружаем .env (для POSTGRES_PASSWORD/POSTGRES_DB)
-set -a
-source "$ENV_FILE"
-set +a
-
-log "Инициализируем роли/расширения в Postgres..."
+echo "[INFO] Инициализируем роли/расширения в Postgres..."
 docker exec -i supabase-db psql -U postgres -d "${POSTGRES_DB:-postgres}" <<SQL
 DO \$\$
 BEGIN
@@ -611,9 +629,8 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;
 SQL
 
-log "Рестарт зависимых сервисов Supabase..."
+echo "[INFO] Перезапускаем сервисы Supabase..."
 docker compose restart auth rest realtime storage functions studio
-
 
 # --- Вывод доступов ---
 cat <<INFO
@@ -656,8 +673,8 @@ Postgres:
 Storage (локальные файлы): том Docker supabase_storage
 
 Studio (BasicAuth, через Traefik):
-  Пользователь:    ${STUDIO_USER}
-  Пароль:          ${STUDIO_PASS}
+  Пользователь:    supabase
+  Пароль:          ${STUDIO_PASS:-<см. при первом запуске>}
 
 WordPress / MariaDB (если выбран WordPress):
   DB_HOST:         wp-db:3306
