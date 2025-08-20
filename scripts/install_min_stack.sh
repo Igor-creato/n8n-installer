@@ -525,4 +525,190 @@ services:
     container_name: wp
     profiles: ["wordpress"]
     environment:
-      - WO
+      - WORDPRESS_DB_HOST=wp-db:3306
+      - WORDPRESS_DB_USER=${WP_DB_USER}
+      - WORDPRESS_DB_PASSWORD=${WP_DB_PASSWORD}
+      - WORDPRESS_DB_NAME=${WP_DB_NAME}
+      - WORDPRESS_CONFIG_EXTRA=define('WP_HOME','https://${SITE_HOST}'); define('WP_SITEURL','https://${SITE_HOST}');
+    volumes:
+      - wp_data:/var/www/html
+    depends_on:
+      - wp-db
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.site.rule=Host(`${SITE_HOST}`)
+      - traefik.http.routers.site.entrypoints=websecure
+      - traefik.http.routers.site.tls.certresolver=le
+      - traefik.http.services.site.loadbalancer.server.port=80
+    restart: unless-stopped
+    networks: [proxy]
+
+  wp-db:
+    image: mariadb:11.4
+    container_name: wp-db
+    profiles: ["wordpress"]
+    environment:
+      - MARIADB_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MARIADB_DATABASE=${WP_DB_NAME}
+      - MARIADB_USER=${WP_DB_USER}
+      - MARIADB_PASSWORD=${WP_DB_PASSWORD}
+    volumes:
+      - wp_db_data:/var/lib/mysql
+    restart: unless-stopped
+    networks: [proxy]
+
+  # --- Сайт: Статический Nginx ---
+  site-static:
+    image: nginx:alpine
+    container_name: site-static
+    profiles: ["static"]
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.site-static.rule=Host(`${SITE_HOST}`)
+      - traefik.http.routers.site-static.entrypoints=websecure
+      - traefik.http.routers.site-static.tls.certresolver=le
+      - traefik.http.services.site-static.loadbalancer.server.port=80
+    restart: unless-stopped
+    networks: [proxy]
+YAML
+
+# --- Запуск ---
+cd "$STACK_DIR"
+docker compose pull
+if [[ "$SITE_TYPE" == "wordpress" ]]; then
+  docker compose --profile wordpress up -d
+else
+  docker compose --profile static up -d
+fi
+
+# === Авто-инициализация ролей Supabase и расширений (идемпотентно) ===
+echo "[INFO] Ждём Postgres (health=healthy)..."
+for i in {1..60}; do
+  status=$(docker inspect -f '{{.State.Health.Status}}' supabase-db 2>/dev/null || echo "unknown")
+  [ "$status" = "healthy" ] && echo "[INFO] Postgres healthy" && break
+  sleep 2
+done
+
+echo "[INFO] Инициализируем роли/расширения в Postgres (через ${POSTGRES_USER})..."
+
+CONNECT_USER="${POSTGRES_USER:-supabase_admin}"
+
+# Проверяем подключение, не падаем при ошибке
+if ! docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" supabase-db \
+  psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" -tc "select 1" >/dev/null 2>&1; then
+  echo "[WARN] Не удалось подключиться к БД как ${CONNECT_USER} — пропускаю инициализацию ролей/расширений."
+else
+  docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -i supabase-db \
+    psql -U "$CONNECT_USER" -d "${POSTGRES_DB:-postgres}" <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_admin LOGIN SUPERUSER PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
+    EXECUTE 'CREATE ROLE authenticator LOGIN NOINHERIT PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE authenticator WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'CREATE ROLE anon NOLOGIN';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'CREATE ROLE authenticated NOLOGIN';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_auth_admin LOGIN PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE supabase_auth_admin WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN
+    EXECUTE 'CREATE ROLE supabase_storage_admin LOGIN PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  ELSE
+    EXECUTE 'ALTER ROLE supabase_storage_admin WITH PASSWORD ''''${POSTGRES_PASSWORD}''''';
+  END IF;
+END
+\$\$;
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- схема для realtime
+CREATE SCHEMA IF NOT EXISTS _realtime AUTHORIZATION supabase_admin;
+SQL
+
+  echo "[INFO] Рестарт сервисов Supabase..."
+  docker compose restart auth rest realtime storage functions studio
+fi
+
+# --- Вывод доступов ---
+cat <<INFO
+
+============================================================
+ УСТАНОВКА ЗАВЕРШЕНА
+============================================================
+
+ДОМЕНЫ И URL:
+  Сайт:            https://${SITE_HOST}
+  n8n:             https://${N8N_HOST}
+  Supabase API:    https://${SUPABASE_HOST}
+    • Auth:        https://${SUPABASE_HOST}/auth/v1
+    • REST:        https://${SUPABASE_HOST}/rest/v1
+    • Storage:     https://${SUPABASE_HOST}/storage/v1
+    • Realtime:    wss://${SUPABASE_HOST}/realtime/v1
+    • Functions:   https://${SUPABASE_HOST}/functions/v1
+    • Meta:        https://${SUPABASE_HOST}/meta/v1
+  Studio:          https://${STUDIO_HOST}
+
+n8n (BasicAuth):
+  Пользователь:    ${N8N_BASIC_AUTH_USER}
+  Пароль:          ${N8N_BASIC_AUTH_PASSWORD}
+  ENCRYPTION_KEY:  ${N8N_ENCRYPTION_KEY}
+
+Supabase ключи:
+  JWT_SECRET:      ${JWT_SECRET}
+  ANON_KEY:        ${ANON_KEY}
+  SERVICE_ROLE_KEY:${SERVICE_ROLE_KEY}
+  SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+
+Postgres:
+  Хост:            db
+  Порт:            5432
+  БД:              ${POSTGRES_DB}
+  Пользователь:    ${POSTGRES_USER}
+  Пароль:          ${POSTGRES_PASSWORD}
+  Строка:          postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+
+Storage (локальные файлы): том Docker supabase_storage
+
+Studio (BasicAuth, через Traefik):
+  Пользователь:    supabase
+  Пароль:          ${STUDIO_PASS:-<см. при первом запуске>}
+
+WordPress / MariaDB (если выбран WordPress):
+  DB_HOST:         wp-db:3306
+  DB_NAME:         ${WP_DB_NAME}
+  DB_USER:         ${WP_DB_USER}
+  DB_PASSWORD:     ${WP_DB_PASSWORD}
+  ROOT_PASSWORD:   ${MYSQL_ROOT_PASSWORD}
+
+Все значения сохранены в: ${ENV_FILE}
+
+Для обновления:
+  cd ${STACK_DIR} && docker compose pull && docker compose up -d
+
+Резервные копии:
+  • DB: volume supabase_db_data
+  • Файлы: supabase_storage, wp_data, wp_db_data, n8n_data
+  • Certs: traefik_letsencrypt
+  Данные сохраняются при перезапусках и обновлениях.
+
+============================================================
+INFO
